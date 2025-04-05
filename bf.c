@@ -49,6 +49,27 @@ int find_matching(int start, char instr, char* prog, long prog_size){
 
 }
 
+void free_prog(bfprog_t** p){
+    if (!p || !(*p)){
+        return;
+    }
+
+    if ((*p)->insts){
+        for (int i = 0; i < (*p)->length; i++){
+            if ((*p)->insts[i].kind == LOOP){
+                free_prog(&(*p)->insts[i].v.body);
+                (*p)->insts[i].v.body = NULL;
+            }
+            (*p)->insts[i] = (bfinst_t){ 0 };
+        }
+        free((*p)->insts);
+        (*p)->insts = NULL;
+    }
+
+    free(*p);
+    *p = NULL;
+}
+
 bfprog_t *parse_bf(char* prog, long prog_size){
     int insts_len = 64;
     bfinst_t* insts = (bfinst_t*)calloc(insts_len, sizeof(bfinst_t));
@@ -296,6 +317,8 @@ int main(int argc, char** argv){
     if (pinst){
         ret = run_bfprog(pinst);
     }
+
+    free_prog(&pinst);
 
     free(prog);
     prog = NULL;
