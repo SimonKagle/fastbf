@@ -14,6 +14,9 @@ typedef struct bfinst {
         INPUT,
         OUTPUT,
         LOOP,
+        ZERO,
+        IF,
+        SET,
     } kind;
 
     union {
@@ -143,16 +146,21 @@ bfprog_t *parse_bf(char* prog, long prog_size){
                         return NULL;
                     }
 
-                    bfprog_t *body = parse_bf(prog + i + 1, end - i - 1);
-                    if (!body){
-                        free(insts);
-                        return NULL;
+                    if (end - i - 1 == 1 && (prog[i + 1] == '-' || prog[i + 1] == '+')){
+                        insts[inst_on] = (bfinst_t){
+                            .kind = ZERO,
+                        };
+                    } else {
+                        bfprog_t *body = parse_bf(prog + i + 1, end - i - 1);
+                        if (!body){
+                            free(insts);
+                            return NULL;
+                        }
+                        insts[inst_on] = (bfinst_t){
+                            .kind = LOOP,
+                            .v.body = body,
+                        };
                     }
-                    insts[inst_on] = (bfinst_t){
-                        .kind = LOOP,
-                        .v.body = body,
-                    };
-                    //printf("inst: LOOP ...\n");
 
                     i = end;
                 }
@@ -206,6 +214,66 @@ bfprog_t *parse_bf(char* prog, long prog_size){
     return res;
 }
 
+// end exclusive
+void del_insts(bfprog_t* prog, int start, int end){
+    if (end > prog->length){
+        end = prog->length;
+    }
+    int del_len = end - start;
+    for (int i = start; i < prog->length; i++){
+        if (i < end && (prog->insts[i].kind == LOOP || prog->insts[i].kind == IF)){
+            free_prog(&prog->insts[i].v.body);
+        }
+
+        if (i + del_len >= prog->length){
+            break;
+        }
+
+        prog->insts[i] = prog->insts[i + del_len];
+    }
+    prog->length -= del_len;
+
+}
+
+void opt_bf(bfprog_t* prog){
+    for (int i = 0; i < prog->length; i++){
+        bfinst_t *inst = &prog->insts[i];
+        switch(inst->kind){
+            case LOOP: {
+                    while (inst->v.body->length == 1 && inst->v.body->insts[0].kind == LOOP){
+                        prog->insts[i] = inst->v.body->insts[0];
+                    }
+
+                    if (inst->v.body->insts[inst->v.body->length - 1].kind == LOOP){
+                        inst->kind = IF;
+                    }
+
+                    opt_bf(inst->v.body);
+                }
+                break;
+            
+            case ZERO: {
+                    if (i + 1 < prog->length){
+                        if (prog->insts[i + 1].kind == ZERO){
+                            del_insts(prog, i, i + 1);
+                            i--;
+                        } else if (prog->insts[i + 1].kind == ADD){
+                            prog->insts[i].kind = SET;
+                            prog->insts[i].v.amount = prog->insts[i + 1].v.amount;
+                            del_insts(prog, i + 1, i + 2);
+                            i--;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            default: break;
+        }
+    }
+}
+
 bfword tape[TAPE_SIZE] = {0};
 bfword *ptr = tape;
 
@@ -241,6 +309,24 @@ int run_bfprog(bfprog_t* prog){
                     }
                 }
                 break;
+            
+            case IF:
+                if (*ptr){
+                    int exit = run_bfprog(inst.v.body);
+                    if (exit < 0){
+                        return exit;
+                    }
+                }
+                break;
+            
+            case ZERO:
+                *ptr = 0;
+                break;
+                
+            case SET:
+                *ptr = inst.v.amount;
+                break;
+            
         }
     }
 
@@ -313,6 +399,7 @@ int main(int argc, char** argv){
 
     // int ret = run_bf(prog, prog_size);
     bfprog_t* pinst = parse_bf(prog, prog_size);
+    opt_bf(pinst);
     int ret = -1;
     if (pinst){
         ret = run_bfprog(pinst);
