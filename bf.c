@@ -59,7 +59,7 @@ void free_prog(bfprog_t** p){
 
     if ((*p)->insts){
         for (int i = 0; i < (*p)->length; i++){
-            if ((*p)->insts[i].kind == LOOP){
+            if ((*p)->insts[i].kind == LOOP || (*p)->insts[i].kind == IF){
                 free_prog(&(*p)->insts[i].v.body);
                 (*p)->insts[i].v.body = NULL;
             }
