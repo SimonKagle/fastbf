@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <stdbool.h>
 
 #define TAPE_SIZE 3000
 
@@ -73,7 +75,24 @@ void free_prog(bfprog_t** p){
     *p = NULL;
 }
 
+bool is_bf_char(char c){
+    return c == '[' || c == ']' || c == '+' || c == '-' || c == '>' || c == '<' || c == '.' || c == ',';
+}
+
 bfprog_t *parse_bf(char* prog, long prog_size){
+
+    // Remove non-bf characters
+    // int offset = 0;
+    // for (int i = 0; i < prog_size; i++){
+    //     if (!is_bf_char(prog[i + offset])){
+    //         offset++;
+    //         prog_size--;
+    //     }
+    //     if (offset){
+    //         prog[i] = prog[i + offset];
+    //     }
+    // }
+
     int insts_len = 64;
     bfinst_t* insts = (bfinst_t*)calloc(insts_len, sizeof(bfinst_t));
     if (!insts){
@@ -385,21 +404,29 @@ int main(int argc, char** argv){
 
     struct stat s = {0};
     stat(argv[1], &s);
-    long prog_size = s.st_size;
     
-    char* prog = (char*)calloc(prog_size, sizeof(char));
+    char* prog = (char*)calloc(s.st_size, sizeof(char));
     if (!prog){
         fclose(f);
         fprintf(stderr, "Could not allocate space for program!\n");
         return EXIT_FAILURE;
     }
 
-    fread(prog, sizeof(char), s.st_size, f);
+    // fread(prog, sizeof(char), s.st_size, f);
+    clock_t start = clock();
+    int prog_size = 0;
+    while (!feof(f)){
+        int c = getc(f);
+        if (is_bf_char(c)){
+            prog[prog_size++] = c;
+        }
+    }
     fclose(f);
 
     // int ret = run_bf(prog, prog_size);
     bfprog_t* pinst = parse_bf(prog, prog_size);
     opt_bf(pinst);
+    printf("%lf\n", ((double)(clock() - start))/CLOCKS_PER_SEC);
     int ret = -1;
     if (pinst){
         ret = run_bfprog(pinst);
