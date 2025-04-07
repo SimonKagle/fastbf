@@ -19,11 +19,17 @@ typedef struct bfinst {
         ZERO,
         IF,
         SET,
+        MADD,
+        SET_AT
     } kind;
 
     union {
         int amount;
         struct bfprog *body;
+        struct {
+            int dst;
+            int amount;
+        } args;
     } v;
 
 } bfinst_t;
@@ -34,6 +40,26 @@ typedef struct bfprog {
 } bfprog_t;
 
 typedef unsigned char bfword;
+
+void* tcalloc(size_t n, size_t size){
+    void* res = calloc(n, size);
+    if (!res){
+        fprintf(stderr, "Could not allocate %zu elements of %zu!\n", n, size);
+        exit(42);
+    }
+
+    return res;
+}
+
+void* trealloc(void* p, size_t size){
+    void* res = realloc(p, size);
+    if (!res){
+        fprintf(stderr, "Could not reallocate %zu bytes for poiter %p!\n", size, p);
+        exit(42);
+    }
+
+    return res;
+}
 
 int find_matching(int start, char instr, char* prog, long prog_size){
     int dir = instr == '[' ? 1 : -1;
@@ -94,11 +120,7 @@ bfprog_t *parse_bf(char* prog, long prog_size){
     // }
 
     int insts_len = 64;
-    bfinst_t* insts = (bfinst_t*)calloc(insts_len, sizeof(bfinst_t));
-    if (!insts){
-        fprintf(stderr, "Could not create buffer for instructions!");
-        return NULL;
-    }
+    bfinst_t* insts = (bfinst_t*)tcalloc(insts_len, sizeof(bfinst_t));
 
     int inst_on = 0;
 
@@ -199,31 +221,14 @@ bfprog_t *parse_bf(char* prog, long prog_size){
         inst_on++;
         if (inst_on >= insts_len){
             insts_len *= 2;
-            bfinst_t* new_insts = (bfinst_t*)realloc(insts, sizeof(bfinst_t) * insts_len);
-            if (!new_insts){
-                fprintf(stderr, "Could not allocate %d instructions!", insts_len);
-                free(insts);
-                return NULL;
-            }
-            insts = new_insts;
+            insts = (bfinst_t*)trealloc(insts, sizeof(bfinst_t) * insts_len);
         }
     }
 
     insts_len = inst_on;
-    bfinst_t* new_insts = (bfinst_t*)realloc(insts, sizeof(bfinst_t) * insts_len);
-    if (!new_insts){
-        fprintf(stderr, "Could not allocate %d instructions!", insts_len);
-        free(insts);
-        return NULL;
-    }
-    insts = new_insts;
+    insts = (bfinst_t*)trealloc(insts, sizeof(bfinst_t) * insts_len);
 
-    bfprog_t* res = (bfprog_t*)calloc(1, sizeof(bfprog_t));
-    if (!res){
-        fprintf(stderr, "Could not allocate program!\n");
-        free(insts);
-        return NULL;
-    }
+    bfprog_t* res = (bfprog_t*)tcalloc(1, sizeof(bfprog_t));
 
     *res = (bfprog_t){
         .length = insts_len,
@@ -259,15 +264,110 @@ void opt_bf(bfprog_t* prog){
         bfinst_t *inst = &prog->insts[i];
         switch(inst->kind){
             case LOOP: {
-                    while (inst->v.body->length == 1 && inst->v.body->insts[0].kind == LOOP){
-                        prog->insts[i] = inst->v.body->insts[0];
+                    const bfinst_t* lbody = inst->v.body->insts;
+                    long lblen = inst->v.body->length;
+
+                    while (lblen == 1 && lbody[0].kind == LOOP){
+                        prog->insts[i] = lbody[0];
                     }
 
-                    if (inst->v.body->insts[inst->v.body->length - 1].kind == LOOP){
+                    if (lbody[lblen - 1].kind == LOOP){
                         inst->kind = IF;
                     }
 
                     opt_bf(inst->v.body);
+
+
+                    if (inst->kind == LOOP){
+                        bool ismvadd = true;
+                        int disp = 0;
+                        int num_dsts = 0;
+                        for (int j = 0; j < lblen; j++){
+                            int kind = lbody[j].kind;
+                            if (kind != MOVE && kind != ADD && kind != SET && kind != ZERO){
+                                ismvadd = false;
+                                break;
+                            }
+
+                            if (kind == MOVE){
+                                disp += lbody[j].v.amount;
+                            } else {
+                                num_dsts++;
+                            }
+                        }
+
+                        if (!ismvadd || disp) break;
+
+                        int table_size = 0;
+                        int madd_dsts[num_dsts][3];
+                        // if (madd_dsts == NULL){
+                        //     exit(5);
+                        // }
+                        int ptr_offset = 0;
+                        int center_entry = -1;
+                        for (int pc = 0; pc < lblen; pc++){
+                            bfinst_t li = lbody[pc];
+
+                            bool is_set = false;
+                            int amnt = 0;
+                            if (li.kind == MOVE){
+                                ptr_offset += li.v.amount;
+                                continue;
+                            } else if (li.kind == SET || li.kind == ZERO){
+                                is_set = true;
+                                amnt = li.kind == ZERO ? 0 : li.v.amount;
+                            } else if (li.kind == ADD){
+                                amnt = li.v.amount;
+                            }
+
+                            // Look-up in table
+                            for (int entry = 0; entry < num_dsts; entry++){
+                                if (entry >= table_size){
+                                    madd_dsts[entry][0] = ptr_offset;
+                                    madd_dsts[entry][1] = 0;
+                                    madd_dsts[entry][2] = 0;
+                                    table_size++;
+                                }
+                                if (madd_dsts[entry][0] == ptr_offset){
+                                    if (is_set){
+                                        madd_dsts[entry][1] = 1;
+                                        madd_dsts[entry][2] = amnt;
+                                    } else {
+                                        madd_dsts[entry][2] = amnt;
+                                    }
+
+                                    if (ptr_offset == 0) center_entry = entry;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (madd_dsts[center_entry][2] != -1 || madd_dsts[center_entry][1]) break;
+
+                        inst->kind = IF;
+                        free_prog(&inst->v.body);
+                        inst->v.body = (bfprog_t*)tcalloc(1, sizeof(bfprog_t));
+                        inst->v.body->length = table_size;
+                        inst->v.body->insts = (bfinst_t*)tcalloc(table_size, sizeof(bfinst_t));
+                        bfinst_t* newbod = inst->v.body->insts;
+                        for (int entry = 0, ins_pos = 0; entry < table_size; entry++, ins_pos++){
+                            if (entry == center_entry){
+                                entry++;
+                            } 
+
+                            newbod[ins_pos] = (bfinst_t){
+                                .kind = madd_dsts[entry][1] ? SET_AT : MADD,
+                                .v.args.amount = madd_dsts[entry][2],
+                                .v.args.dst = madd_dsts[entry][0],
+                            };
+                            
+                        }
+
+                        newbod[table_size - 1] = (bfinst_t){
+                            .kind = SET,
+                            .v.amount = 0
+                        };
+                    }
                 }
                 break;
             
@@ -291,6 +391,7 @@ void opt_bf(bfprog_t* prog){
             default: break;
         }
     }
+
 }
 
 bfword tape[TAPE_SIZE] = {0};
@@ -345,6 +446,16 @@ int run_bfprog(bfprog_t* prog){
             case SET:
                 *ptr = inst.v.amount;
                 break;
+            
+            case SET_AT:
+                *(ptr + inst.v.args.dst) = inst.v.args.amount;
+                break;
+
+            case MADD:
+                *(ptr + inst.v.args.dst) += *ptr * inst.v.args.amount;
+                break;
+            
+            default: break;
             
         }
     }
@@ -405,15 +516,10 @@ int main(int argc, char** argv){
     struct stat s = {0};
     stat(argv[1], &s);
     
-    char* prog = (char*)calloc(s.st_size, sizeof(char));
-    if (!prog){
-        fclose(f);
-        fprintf(stderr, "Could not allocate space for program!\n");
-        return EXIT_FAILURE;
-    }
+    char* prog = (char*)tcalloc(s.st_size, sizeof(char));
 
     // fread(prog, sizeof(char), s.st_size, f);
-    clock_t start = clock();
+    // clock_t start = clock();
     int prog_size = 0;
     while (!feof(f)){
         int c = getc(f);
@@ -426,7 +532,7 @@ int main(int argc, char** argv){
     // int ret = run_bf(prog, prog_size);
     bfprog_t* pinst = parse_bf(prog, prog_size);
     opt_bf(pinst);
-    printf("%lf\n", ((double)(clock() - start))/CLOCKS_PER_SEC);
+    // printf("%lf\n", ((double)(clock() - start))/CLOCKS_PER_SEC);
     int ret = -1;
     if (pinst){
         ret = run_bfprog(pinst);
