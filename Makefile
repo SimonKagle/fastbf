@@ -1,9 +1,9 @@
 CC=clang
-CFLAGS=-Wall -Werror -O3
+CFLAGS=-Wall -Werror -O3 -gdwarf-4
 
-.PHONY: all clean
+.PHONY: all clean d
 
-all: bf.o
+all: bf.o bf_utils.o
 	$(CC) $(CFLAGS) $^ -o bf
 
 %.o: %.c

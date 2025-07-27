@@ -1,110 +1,18 @@
+#include "bf.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <stdbool.h>
+#include <string.h>
 
-#define TAPE_SIZE 3000
-
-struct bfinst;
-struct bfprog;
-
-typedef struct bfinst {
-    enum {
-        ADD,
-        MOVE,
-        INPUT,
-        OUTPUT,
-        LOOP,
-        ZERO,
-        IF,
-        SET,
-        MADD,
-        SET_AT
-    } kind;
-
-    union {
-        int amount;
-        struct bfprog *body;
-        struct {
-            int dst;
-            int amount;
-        } args;
-    } v;
-
-} bfinst_t;
-
-typedef struct bfprog {
-    int length;
-    bfinst_t* insts;
-} bfprog_t;
-
-typedef unsigned char bfword;
-
-void* tcalloc(size_t n, size_t size){
-    void* res = calloc(n, size);
-    if (!res){
-        fprintf(stderr, "Could not allocate %zu elements of %zu!\n", n, size);
-        exit(42);
-    }
-
-    return res;
-}
-
-void* trealloc(void* p, size_t size){
-    void* res = realloc(p, size);
-    if (!res){
-        fprintf(stderr, "Could not reallocate %zu bytes for poiter %p!\n", size, p);
-        exit(42);
-    }
-
-    return res;
-}
-
-int find_matching(int start, char instr, char* prog, long prog_size){
-    int dir = instr == '[' ? 1 : -1;
-    char other = instr == '[' ? ']' : '[';
-    int invar = 0;
-    int pos = start;
-    while (pos >= 0 && pos < prog_size){
-        if (prog[pos] == instr) invar++;
-        if (prog[pos] == other) invar--;
-
-        if (invar < 0) return -1;
-        else if (invar == 0) return pos;
-
-        pos += dir;
-    }
-
-    return -1;
-
-}
-
-void free_prog(bfprog_t** p){
-    if (!p || !(*p)){
-        return;
-    }
-
-    if ((*p)->insts){
-        for (int i = 0; i < (*p)->length; i++){
-            if ((*p)->insts[i].kind == LOOP || (*p)->insts[i].kind == IF){
-                free_prog(&(*p)->insts[i].v.body);
-                (*p)->insts[i].v.body = NULL;
-            }
-            (*p)->insts[i] = (bfinst_t){ 0 };
-        }
-        free((*p)->insts);
-        (*p)->insts = NULL;
-    }
-
-    free(*p);
-    *p = NULL;
-}
-
-bool is_bf_char(char c){
-    return c == '[' || c == ']' || c == '+' || c == '-' || c == '>' || c == '<' || c == '.' || c == ',';
-}
-
+/**
+ * Parses BF program into tree of instructions
+ * @param prog Program text
+ * @param prog_size Program length
+ * @returns Pointer to tree of instruction nodes
+ */
 bfprog_t *parse_bf(char* prog, long prog_size){
 
     // Remove non-bf characters
@@ -238,137 +146,138 @@ bfprog_t *parse_bf(char* prog, long prog_size){
     return res;
 }
 
-// end exclusive
-void del_insts(bfprog_t* prog, int start, int end){
-    if (end > prog->length){
-        end = prog->length;
-    }
-    int del_len = end - start;
-    for (int i = start; i < prog->length; i++){
-        if (i < end && (prog->insts[i].kind == LOOP || prog->insts[i].kind == IF)){
-            free_prog(&prog->insts[i].v.body);
-        }
-
-        if (i + del_len >= prog->length){
+int get_num_dsts(const bfinst_t* lbody, long lblen){
+    bool ismvadd = true;
+    int disp = 0;
+    int num_dsts = 0;
+    for (int j = 0; j < lblen; j++){
+        int kind = lbody[j].kind;
+        if (kind != MOVE && kind != ADD && kind != SET && kind != ZERO){
+            ismvadd = false;
             break;
         }
 
-        prog->insts[i] = prog->insts[i + del_len];
+        if (kind == MOVE){
+            disp += lbody[j].v.amount;
+        } else {
+            num_dsts++;
+        }
     }
-    prog->length -= del_len;
 
+    return !ismvadd || disp ? -1 : num_dsts;
+}
+
+void convert_to_mvadd(const bfinst_t* lbody, long lblen, bfinst_t *inst){
+    int num_dsts = get_num_dsts(lbody, lblen);
+        if (num_dsts <= 0){
+            return;
+        }
+
+        int table_size = 0;
+        struct {
+            int ptr_offset;
+            bool is_set;
+            int amnt;
+        } madd_dsts[num_dsts];
+        int ptr_offset = 0;
+        int center_entry = -1;
+        for (int pc = 0; pc < lblen; pc++){
+            bfinst_t li = lbody[pc];
+
+            bool is_set = false;
+            int amnt = 0;
+            if (li.kind == MOVE){
+                ptr_offset += li.v.amount;
+                continue;
+            } else if (li.kind == SET || li.kind == ZERO){
+                is_set = true;
+                amnt = li.kind == ZERO ? 0 : li.v.amount;
+            } else if (li.kind == ADD){
+                amnt = li.v.amount;
+            }
+
+            // Look-up in table
+            for (int entry = 0; entry < num_dsts; entry++){
+                if (entry >= table_size){
+                    madd_dsts[entry].ptr_offset = ptr_offset;
+                    madd_dsts[entry].is_set = false;
+                    madd_dsts[entry].amnt = 0;
+                    table_size++;
+                }
+                if (madd_dsts[entry].ptr_offset == ptr_offset){
+                    if (is_set){
+                        madd_dsts[entry].is_set = true;
+                        madd_dsts[entry].amnt = amnt;
+                    } else {
+                        madd_dsts[entry].amnt = amnt;
+                    }
+
+                    if (ptr_offset == 0) center_entry = entry;
+                    break;
+                }
+            }
+        }
+
+        if (madd_dsts[center_entry].amnt != -1 || madd_dsts[center_entry].is_set) return;
+
+        inst->kind = IF;
+        free_prog(&inst->v.body);
+        inst->v.body = (bfprog_t*)tcalloc(1, sizeof(bfprog_t));
+        inst->v.body->length = table_size;
+        inst->v.body->insts = (bfinst_t*)tcalloc(table_size, sizeof(bfinst_t));
+        bfinst_t* newbod = inst->v.body->insts;
+        for (int entry = 0, ins_pos = 0; entry < table_size; entry++, ins_pos++){
+            if (entry == center_entry){
+                entry++;
+            } 
+
+            newbod[ins_pos] = (bfinst_t){
+                .kind = madd_dsts[entry].is_set ? SET_AT : MADD,
+                .v.args.amount = madd_dsts[entry].amnt,
+                .v.args.dst = madd_dsts[entry].ptr_offset,
+            };
+            
+        }
+
+        newbod[table_size - 1] = (bfinst_t){
+            .kind = SET,
+            .v.amount = 0
+        };
+}
+
+void opt_bf_loops(bfprog_t* prog, bfinst_t *inst, int i){
+    const bfinst_t* lbody = inst->v.body->insts;
+    long lblen = inst->v.body->length;
+
+    while (lblen == 1 && lbody[0].kind == LOOP){
+        prog->insts[i] = lbody[0];
+    }
+
+    if (lbody[lblen - 1].kind == LOOP){
+        inst->kind = IF;
+    }
+
+    opt_bf(inst->v.body);
+
+
+    if (inst->kind == LOOP){
+        if (inst->v.body->length == 1 && inst->v.body[0].insts[0].kind == MOVE){
+            inst->kind = SKIP;
+            int amnt = inst->v.body[0].insts[0].v.amount;
+            free_prog(&inst->v.body);
+            inst->v.amount = amnt;
+        } else {
+            convert_to_mvadd(lbody, lblen, inst);
+        }
+    }
 }
 
 void opt_bf(bfprog_t* prog){
     for (int i = 0; i < prog->length; i++){
         bfinst_t *inst = &prog->insts[i];
         switch(inst->kind){
-            case LOOP: {
-                    const bfinst_t* lbody = inst->v.body->insts;
-                    long lblen = inst->v.body->length;
-
-                    while (lblen == 1 && lbody[0].kind == LOOP){
-                        prog->insts[i] = lbody[0];
-                    }
-
-                    if (lbody[lblen - 1].kind == LOOP){
-                        inst->kind = IF;
-                    }
-
-                    opt_bf(inst->v.body);
-
-
-                    if (inst->kind == LOOP){
-                        bool ismvadd = true;
-                        int disp = 0;
-                        int num_dsts = 0;
-                        for (int j = 0; j < lblen; j++){
-                            int kind = lbody[j].kind;
-                            if (kind != MOVE && kind != ADD && kind != SET && kind != ZERO){
-                                ismvadd = false;
-                                break;
-                            }
-
-                            if (kind == MOVE){
-                                disp += lbody[j].v.amount;
-                            } else {
-                                num_dsts++;
-                            }
-                        }
-
-                        if (!ismvadd || disp) break;
-
-                        int table_size = 0;
-                        int madd_dsts[num_dsts][3];
-                        // if (madd_dsts == NULL){
-                        //     exit(5);
-                        // }
-                        int ptr_offset = 0;
-                        int center_entry = -1;
-                        for (int pc = 0; pc < lblen; pc++){
-                            bfinst_t li = lbody[pc];
-
-                            bool is_set = false;
-                            int amnt = 0;
-                            if (li.kind == MOVE){
-                                ptr_offset += li.v.amount;
-                                continue;
-                            } else if (li.kind == SET || li.kind == ZERO){
-                                is_set = true;
-                                amnt = li.kind == ZERO ? 0 : li.v.amount;
-                            } else if (li.kind == ADD){
-                                amnt = li.v.amount;
-                            }
-
-                            // Look-up in table
-                            for (int entry = 0; entry < num_dsts; entry++){
-                                if (entry >= table_size){
-                                    madd_dsts[entry][0] = ptr_offset;
-                                    madd_dsts[entry][1] = 0;
-                                    madd_dsts[entry][2] = 0;
-                                    table_size++;
-                                }
-                                if (madd_dsts[entry][0] == ptr_offset){
-                                    if (is_set){
-                                        madd_dsts[entry][1] = 1;
-                                        madd_dsts[entry][2] = amnt;
-                                    } else {
-                                        madd_dsts[entry][2] = amnt;
-                                    }
-
-                                    if (ptr_offset == 0) center_entry = entry;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (madd_dsts[center_entry][2] != -1 || madd_dsts[center_entry][1]) break;
-
-                        inst->kind = IF;
-                        free_prog(&inst->v.body);
-                        inst->v.body = (bfprog_t*)tcalloc(1, sizeof(bfprog_t));
-                        inst->v.body->length = table_size;
-                        inst->v.body->insts = (bfinst_t*)tcalloc(table_size, sizeof(bfinst_t));
-                        bfinst_t* newbod = inst->v.body->insts;
-                        for (int entry = 0, ins_pos = 0; entry < table_size; entry++, ins_pos++){
-                            if (entry == center_entry){
-                                entry++;
-                            } 
-
-                            newbod[ins_pos] = (bfinst_t){
-                                .kind = madd_dsts[entry][1] ? SET_AT : MADD,
-                                .v.args.amount = madd_dsts[entry][2],
-                                .v.args.dst = madd_dsts[entry][0],
-                            };
-                            
-                        }
-
-                        newbod[table_size - 1] = (bfinst_t){
-                            .kind = SET,
-                            .v.amount = 0
-                        };
-                    }
-                }
+            case LOOP:
+                opt_bf_loops(prog, inst, i);
                 break;
             
             case ZERO: {
@@ -453,6 +362,12 @@ int run_bfprog(bfprog_t* prog){
 
             case MADD:
                 *(ptr + inst.v.args.dst) += *ptr * inst.v.args.amount;
+                break;
+            
+            case SKIP:
+                if (!*ptr) break;
+                for (; *ptr && ptr >= tape && ptr < tape + TAPE_SIZE; ptr += inst.v.amount);
+                if (*ptr || !(ptr >= tape && ptr < tape + TAPE_SIZE)) return 1;
                 break;
             
             default: break;
